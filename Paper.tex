@@ -1,16 +1,180 @@
-\documentclass{article}
-\usepackage{setspace}
-\doublespacing{}
-\title{Caches are Optimization: An Overview of the Cache, Sideloading Attacks, and Defense Mechanisms}
+\documentclass[man,12pt,apacite,nofontenc,nolmodern,floatsintext]{apa6}
+\usepackage{fontspec}
+\setmainfont{Times New Roman}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{url}
+\urlstyle{same}
+\title{Architectural Security: Cache Side Channels, Transient Execution, and Performance Tradeoffs}
+\shorttitle{Architectural Security and Performance}
 \author{Faris Jiwad}
-\date{October 2026}
+\affiliation{The George Washington University}
+\abstract{Processor optimizations can preserve the architectural results of a program while exposing information through microarchitectural state. This literature-based analysis examines how cache side channels and transient-execution attacks have expanded the security responsibilities of computer architects. FLUSH+RELOAD, Spectre, and Meltdown illustrate distinct ways in which shared resources, prediction, and deferred fault handling can undermine isolation. The analysis compares the assets at risk, attacker prerequisites, crossed trust boundaries, mitigation costs, and residual exposure. Selected research on processor-buffer leakage and physical memory disturbance establishes the limits of a cache-centered explanation. The review also evaluates symbolic execution, speculative taint tracking, and speculative buffering as approaches to constraining information flow. Its contribution is a qualitative comparison of attack prerequisites and defense guarantees rather than a new exploit or performance experiment. The central argument is that security does not require making computers uniformly slower: it requires preventing unauthorized information flows at explicitly defined trust boundaries, even when doing so limits selected performance optimizations.}
+\keywords{computer architecture, cache side channels, transient execution, hardware security, performance tradeoffs}
 \begin{document}
 \maketitle
-\begin{abstract}
-    Caches were first introduced to modern systems in order to both retrieve and store memory closer to the central processing unit but also to reduce time on subsequent memory requests on cache hits. However, recent attack patterns have revealed themselves based on utilizing the cache, branch prediction, and fault handling. 
-    In this paper, I put forward a brief overview of the cache and a deep dive into attacks such as Spectre and Meltdown attacks, which utilize the cache in those attacks. I will also discuss mitigations provided for those attacks and what other work is being developed. 
-\end{abstract}
-\section{Introduction}
-First document. This is a simple example, with no 
-extra parameters or packages included.
+Computer architecture has traditionally used an instruction set to specify the behavior software can rely on while allowing implementations considerable freedom to improve performance. Caches reduce memory-access latency, out-of-order execution exploits instruction-level parallelism, and branch prediction enables useful work before control flow is resolved. These mechanisms can preserve correct architectural results without making all intermediate activity invisible. Cache side channels and transient-execution attacks demonstrate that this distinction matters for security: an instruction need not retire successfully to leave evidence of sensitive information~\cite{spectre2019,meltdown2018,yarom2014}.
+
+This paper asks how security has changed the design obligations of computer architects. It addresses four related questions: what low-level assets require protection, which attacks have demonstrated failures of isolation, how those attacks have been mitigated, and what costs those mitigations impose. Its scope is deliberately centered on FLUSH+RELOAD, Spectre, and Meltdown rather than an exhaustive account of hardware security. RowHammer and microarchitectural data sampling provide contrasting examples that test whether a cache-centered explanation is sufficient.
+
+The central argument is that security has expanded the meaning of isolation beyond access permissions on architectural memory. It also requires controlling information flows through shared microarchitectural resources and, in some cases, physical memory behavior. This does not imply that faster computers are inherently insecure or that slower operating systems are inherently safe. It means that performance optimizations must operate within explicit security constraints.
+
+The contribution here is a comparative synthesis of published research, not a new exploit, benchmark, or formal proof. The same risk questions are applied across the attacks, and defenses are compared by the stage of information flow they constrain. Reported experimental results remain attributable to their original authors. The analysis distinguishes demonstrated feasibility from the frequency of exploitation in operational systems; the selected papers do not establish that frequency.
+
+\section{What Must Be Protected?}
+\subsection{Architectural State and Trust Boundaries}
+Architectural state includes the register values, memory contents, and privilege-related behavior exposed through the instruction set. Page permissions and privilege levels are intended to prevent an untrusted process from reading or changing protected state. The assets include cryptographic keys, credentials, application data, and kernel information. Their value is not determined by size: disclosing a short key can compromise much more information than the number of leaked bytes suggests.
+
+The relevant security boundary must also be identified. A process boundary separates applications, a user--kernel boundary separates ordinary software from privileged services, and a virtual-machine boundary separates tenants sharing a host. A sandbox can impose another boundary inside one address space. Consequently, a load being permitted by the victim's page tables does not establish that an attacker is authorized to learn its result. Spectre exploits this distinction between the victim's authority and the attacker's authority~\cite{spectre2019}.
+
+\subsection{Microarchitectural State and Observable Behavior}
+Caches store copies of memory in lines, and an access that hits in a cache is generally faster than an access that requires retrieval from a lower level. This timing difference is useful for performance but can reveal whether another computation accessed particular data. FLUSH+RELOAD demonstrated that shared physical pages and a shared last-level cache could expose fine-grained access patterns even when attacker and victim ran on different cores~\cite{yarom2014}.
+
+Other relevant structures include translation lookaside buffers (TLBs), branch predictors, reorder buffers, load and store buffers, and line-fill buffers. These are not interchangeable. A TLB caches address translations; a reorder buffer supports in-order retirement of instructions executed out of order; load and store structures track memory operations; and line-fill buffers hold data involved in cache-line transfers. Their exact organization is implementation-dependent. RIDL later demonstrated why temporary data paths, not only stable cache contents, belong in the security analysis~\cite{ridl2019}.
+
+It is therefore misleading to treat every microarchitectural structure as a secret that must be hidden completely. The objective is to prevent an unauthorized observer from learning protected information through its behavior. Shared hardware may remain useful if its interactions preserve the required boundary. Hardware--software contracts for secure speculation make this responsibility explicit by relating permitted hardware observations to the properties software must satisfy~\cite{contracts2021}.
+
+\subsection{Confidentiality Is Not the Only Goal}
+The main transient-execution cases in this paper concern confidentiality. Integrity requires preventing unauthorized changes, while availability requires that a service remain usable. RowHammer illustrates a different failure: repeated DRAM row activations can induce disturbance errors in nearby cells, so ordinary memory activity can affect data outside the accessed locations~\cite{kim2014}. This is not a cache-timing attack or a branch-prediction attack. It shows why protecting low-level state also requires examining physical interactions that software permissions do not describe.
+
+\section{From Cache Observation to Transient Execution}
+\subsection{FLUSH+RELOAD: Observing a Victim's Accesses}
+Yarom and Falkner's FLUSH+RELOAD attack exploits cache lines belonging to physical pages shared by attacker and victim. Conceptually, the attacker removes a monitored line from the cache hierarchy, allows the victim to execute, and measures the latency of accessing that line again. A relatively fast reload provides evidence that the victim accessed it in the intervening period. On the systems studied, the shared last-level cache made same-core execution unnecessary~\cite{yarom2014}.
+
+The x86 \texttt{CLFLUSH} instruction is important to this technique, but it is not a kernel command reserved for privileged processes. Unprivileged native code can use it on permitted addresses. It invalidates the addressed cache line within the coherence domain rather than flushing the entire cache. Its accessibility explains part of the attack's practicality; simply treating it as an accidental privilege violation would misidentify the vulnerability~\cite{yarom2014}.
+
+The authors attacked GnuPG 1.4.13 and reported recovering, on average, 96.7\% of secret-key bits from observation of one signature or decryption operation in their experiments~\cite{yarom2014}. This is evidence of leakage in a cryptographic implementation, not a mathematical defeat of RSA. A secure algorithm can still be implemented so that secret-dependent execution reveals its key.
+
+FLUSH+RELOAD also clarifies the relationship between older cache attacks and Spectre or Meltdown. It provides an observation mechanism. Spectre and Meltdown add ways to make transient computation encode sensitive information into observable state. The mechanisms are complementary, but FLUSH+RELOAD is not the only possible channel: the Spectre work also discusses eviction-based techniques and other observable effects~\cite{spectre2019}. Removing one instruction or eliminating page sharing can obstruct a particular construction without eliminating transient-execution leakage generally.
+
+\subsection{Meltdown: Deferred Fault Handling and Privileged Data}
+Meltdown demonstrates that, on affected processors, a user-mode load can transiently supply data from a supervisor-protected mapping before the access violation takes architectural effect. Dependent instructions can encode the value into cache state. The fault prevents an ordinary architectural read from completing, but does not necessarily erase the information already encoded~\cite{meltdown2018}.
+
+The key distinction is between instruction execution and retirement. A processor can execute work before it knows that the work may commit. Precise exception handling preserves architectural behavior by preventing the faulting instruction and younger instructions from committing their ordinary results. It does not, by itself, guarantee that their timing effects are unobservable. The original Meltdown mechanism does not require mistraining a branch predictor~\cite{meltdown2018}.
+
+Two address-space distinctions are important. Before KPTI, an operating system could retain supervisor-only kernel mappings in the virtual address space active during user execution to make transitions efficient. This was not equivalent to granting user code permission to read those pages, nor did it mean user and kernel memory were the same physical addresses. Meltdown violated the intended protection on vulnerable implementations. Likewise, KASLR randomizes kernel locations; it is not the permission mechanism that establishes isolation. Defeating randomization may help locate targets, but is not the same as gaining authorized access.
+
+Exception handling or suppression makes repeated leakage practical, but neither a complete kernel dump in a fixed number of cycles nor exposure of every physical address follows universally. Reach depends on mappings, the processor, the software environment, and the observation mechanism. The direct effect is unauthorized reading, not an automatic grant of administrative privileges. Leaked credentials or other useful state could enable further compromise, but that is an additional attack step~\cite{meltdown2018}.
+
+\subsection{Spectre: Misprediction and the Victim's Authority}
+Spectre causes a victim to execute transient instruction sequences that its correct execution would not execute, then observes information encoded through a side channel. In the original bounds-check-bypass example, conditional-branch prediction allows a transient out-of-bounds access before the bounds check resolves. In branch-target injection, predictor manipulation redirects transient execution toward a useful instruction sequence, or gadget, in the victim's executable code~\cite{spectre2019}.
+
+The attacker's ability to influence prediction does not amount to ordinary control of the victim's committed execution. That distinction is why code that behaves correctly under the architectural model may still disclose data transiently. A large body of executable code can provide candidate gadgets, but the presence of a gadget alone does not establish exploitability: register state, attacker-controlled inputs, speculation windows, and observability must also align~\cite{spectre2019}.
+
+Unlike the original Meltdown permission bypass, classic Spectre uses memory that the \emph{victim execution context} can access. It is too strong to conclude that Spectre therefore cannot disclose kernel information. If privileged code is the victim and the necessary attack conditions exist, its authority can expose data unavailable to the attacker. Within one process, a sandbox boundary may likewise be crossed without violating a page permission. Spectre does not require an architectural fault to trigger the original branch-misprediction attacks~\cite{canella2019,spectre2019}.
+
+The original Spectre research demonstrated susceptibility across tested Intel, AMD, and ARM processors~\cite{spectre2019}. This does not mean every processor supports every variant. Nor should Meltdown be treated as one unchanging vendor-specific category: Canella et al. identify additional exception-based effects and distinguish them from prediction-based attacks. Their systematization reports two new exploitable Meltdown effects and four new Spectre mistraining strategies, demonstrating the value of classifying mechanisms rather than relying only on attack names~\cite{canella2019}.
+
+\subsection{Beyond the Cache: Data Sampling and DRAM Disturbance}
+The question of whether other processor buffers could leak data was subsequently addressed by work including RIDL, or Rogue In-Flight Data Load. RIDL investigates sampling data passing through internal structures such as line-fill buffers and load ports on affected Intel processors~\cite{ridl2019}. Buffer sampling is not simply an arbitrary read from a chosen victim address: obtaining useful information depends on what data becomes available in the vulnerable internal path and how observations are interpreted. Nevertheless, it weakens the assumption that removing a cache-resident secret is enough to remove exposure.
+
+RowHammer provides a complementary limit on this explanation. Kim et al. found disturbance errors in 110 of 129 tested DRAM modules and proposed probabilistic adjacent row activation (PARA), which refreshes nearby rows with a small probability when a row is activated and closed~\cite{kim2014}. The original study characterizes the physical error mechanism; turning a disturbance error into a particular privilege escalation requires additional conditions. Neither its tested prevalence nor its proposed defense should be generalized without qualification to all later memory devices.
+
+\section{Risk Analysis}
+\subsection{Assessment Method and Evidence Limits}
+Risk is not adequately described by saying that an attack can leak a secret. The assessment must connect an asset and its consequences to attacker capabilities and deployment conditions. Here, each case is evaluated by the protected asset, required access, crossed boundary, direct impact, mitigation assumptions, and remaining exposure. Table~\ref{tab:risk} summarizes the comparison. It is a qualitative synthesis of the cited research, not a measured incident-rate model or a numerical vulnerability score.
+
+\begin{table}[htbp]
+\centering
+\caption{Qualitative Comparison of Attack Prerequisites and Consequences}\label{tab:risk}
+\small
+\renewcommand{\baselinestretch}{1}\selectfont
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.21\textwidth}*{3}{>{\raggedright\arraybackslash}X}@{}}
+\toprule
+Case & Important prerequisites & Direct consequence & Remaining question after mitigation \\
+\midrule
+FLUSH+RELOAD & Shared physical lines, timing observations, and revealing victim accesses & Access-pattern disclosure; possible key recovery & Are other cache channels or secret-dependent accesses still available? \\
+\addlinespace
+Meltdown & Affected CPU, attacker execution, and protected mapped data reachable by the mechanism & Supervisor-data disclosure & Are mappings minimized and protections effective for this CPU and variant? \\
+\addlinespace
+Spectre & Suitable victim gadget, prediction influence, and an observable channel & Disclosure using the victim's authority & Which predictions, gadgets, and channels does the defense actually cover? \\
+\addlinespace
+RIDL & Affected internal data path and useful sampled victim activity & Cross-boundary disclosure of in-flight data & Can sensitive data reenter a vulnerable path despite clearing? \\
+\addlinespace
+RowHammer & Susceptible DRAM and sufficient activation activity & Unauthorized bit changes & Does the refresh or error-control mechanism cover the device's disturbance behavior? \\
+\bottomrule
+\end{tabularx}
+\begin{flushleft}
+\textit{Note.} Synthesized from~\cite{kim2014,spectre2019,meltdown2018,ridl2019,yarom2014}. Prerequisites are case-specific, not sufficient conditions for every variant.
+\end{flushleft}
+\end{table}
+
+\subsection{Attacker Access and Exploitability}
+Local execution is an important prerequisite in the main native-code examples, but it must not be equated with prior administrative compromise. An ordinary user process or a tenant's virtual machine can be the attacker's starting point. Such access is expected in a multi-user system; its existence does not excuse a failure to isolate another domain. The original Spectre research also demonstrates a browser-based example, showing that untrusted code need not arrive as a conventionally installed executable~\cite{spectre2019}.
+
+The sharing requirements differ. The original FLUSH+RELOAD construction needs shared physical pages containing monitored lines. Sharing a host alone is insufficient. Removing deduplication or a particular shared mapping can remove that prerequisite, although other cache techniques have different requirements. Spectre requires a useful transient path and sufficient influence over prediction, while original Meltdown requires a vulnerable implementation of the relevant access checks. Treating these conditions as equivalent would overstate some risks and overlook others~\cite{canella2019,yarom2014}.
+
+Noise affects practical reliability. Scheduling, unrelated accesses, and variation in victim activity can complicate observation, so a laboratory demonstration does not establish the same leakage rate in every deployment. Conversely, noise is not a dependable isolation mechanism: repeated observations may allow an attacker to recover a useful signal. A defensible assessment asks whether prerequisites can be removed, not merely whether the current measurement environment is inconvenient.
+
+\subsection{Impact, Scale, and Persistence}
+The immediate consequences of FLUSH+RELOAD, Spectre, Meltdown, and RIDL are primarily losses of confidentiality. Secondary consequences depend on the information obtained. A recovered signing key could support impersonation, and a credential could enable later authorized-looking access. These are plausible consequence chains, not proof that every successful leak yields total system control. For RowHammer, the direct consequence is an integrity failure; whether a changed bit causes a crash, useful corruption, or no material effect depends on its location and use.
+
+Persistence also has two meanings. A transient instruction leaves no committed instruction result, but the information it discloses can remain useful after execution ends. Restoring isolation does not make an already-disclosed key secret again. Similarly, a disturbed DRAM bit can affect subsequent computation until corrected or overwritten. Risk management must therefore consider recovery actions, including replacement of exposed secrets, rather than assuming that installing a mitigation reverses previous disclosure.
+
+Scale depends on deployment rather than attack branding. Shared cloud infrastructure can place unrelated principals on the same physical hardware, increasing the importance of cross-domain resource isolation. A dedicated machine changes the co-residency problem but does not automatically eliminate untrusted browser code or local user processes. The evidence here establishes research demonstrations across specified boundaries, including virtual-machine scenarios for FLUSH+RELOAD and RIDL~\cite{ridl2019,yarom2014}; it does not establish how often malicious actors exploited them in the wild.
+
+\subsection{Residual and Operational Risk}
+A mitigation should be evaluated as a conditional claim: on specified hardware, with specified software changes, it blocks a specified flow. KPTI does not establish protection against every Spectre gadget, and preventing speculative cache installation does not establish that all internal timing behavior is safe. Canella et al.'s evaluation found incomplete coverage among defenses, reinforcing the need to identify the protected mechanism explicitly~\cite{canella2019}.
+
+Operational costs matter as well. Required firmware, operating-system, compiler, and application changes may not arrive or be deployed together. A defense dependent on correct placement of barriers can fail if a relevant path is missed. Conversely, deploying a broad restriction everywhere may consume capacity unnecessarily. My assessment is that the highest-priority question is not which attack has the most alarming demonstration, but which important boundary remains exposed under realistic attacker capabilities and an organization's actual mitigation configuration.
+
+\section{Mitigations and Their Architectural Costs}
+\subsection{Removing Exposure and Restricting Execution}
+For original Meltdown, KAISER and its production counterpart KPTI reduce the kernel mappings present while user code executes. This removes much of the protected mapped data from the vulnerable context instead of merely adding delay. Some transition-related mappings remain necessary. Switching page-table contexts and managing translation state can impose overhead, particularly for workloads with frequent user--kernel transitions; the cost depends on the processor and workload~\cite{meltdown2018}.
+
+For cache leakage, eliminating unnecessary shared pages and avoiding secret-dependent memory-access patterns address different parts of the problem. Constant-time cryptographic programming aims to prevent secrets from determining observable control flow and memory-access patterns, not to guarantee identical wall-clock duration under every external disturbance. Partitioning resources can restrict cross-domain interference, but may reduce effective capacity or flexibility. Sanctum illustrates a research architecture that deliberately combines protected execution with isolation of relevant memory-system resources rather than assuming that protected memory contents alone are sufficient~\cite{sanctum2016}.
+
+Spectre defenses include compiler transformations, suitable speculation barriers, and processor controls targeting prediction behavior. Their guarantees depend on the relevant instruction semantics, processor, and variant; a memory-ordering operation should not automatically be assumed to be a universal speculation barrier. The cost is lost overlap or predictor usefulness where restrictions apply, plus the burden of identifying the paths that require protection~\cite{canella2019,contracts2021}.
+
+\subsection{Symbolic Execution: Moving Analysis Offline}
+Symbolic execution analyzes a program using symbolic inputs rather than one fixed set of concrete values. When execution reaches a branch, the analysis records the conditions under which alternative paths are possible. A solver can determine whether combinations of those conditions permit a security violation. This can identify problems ordinary testing misses, but loops and branches can produce many paths, making exhaustive analysis expensive~\cite{spectector2020}.
+
+Spectector applies this approach to speculative information flow. Its speculative noninterference property asks, informally, whether two executions that are indistinguishable under the modeled non-speculative observations remain indistinguishable when speculative observations are included. It does not require that programs never mispredict or that two runs never take different branches. It requires that speculation not introduce additional distinguishability beyond the reference behavior, within the specified model~\cite{spectector2020}.
+
+This answers the offline-versus-online question raised by the reading notes: Spectector is a program-analysis tool, not a requirement to symbolically execute every running application alongside its ordinary execution. Its scalability problem is primarily analysis effort, including path exploration and solver work. The authors evaluated scalability using Xen hypervisor code and reported no fundamental bottleneck beyond those inherited from symbolic execution. That is not a claim that arbitrary whole applications can be exhaustively verified at negligible cost. Results remain conditional on the supported instruction semantics, modeled observations, and any bounds used in analysis~\cite{spectector2020}.
+
+\subsection{Taint Tracking: Restricting Sensitive Dependencies}
+Taint tracking associates metadata with selected data and propagates it through dependent computations. If a value is marked sensitive, a derived value can retain that designation. A security policy then restricts operations that would expose it. The usefulness of the technique depends on which sources are marked, how dependencies are propagated, and which observations count as disclosure.
+
+Speculative Taint Tracking (STT) applies this idea to data accessed speculatively. It tracks dependencies and constrains potentially revealing uses until the relevant speculation is safe, while allowing work that need not expose the protected data. It is not simply a mechanism for delaying retirement: retirement already preserves architectural correctness, whereas the security problem concerns effects observable before retirement. The paper also addresses implicit channels that require more care than marking an explicit address dependency~\cite{stt2019}.
+
+The claim that taint tracking prevents every Spectre attack is therefore too broad without a threat model. STT's guarantee concerns speculatively accessed data under its stated model; it is not a universal guarantee for all information a program intentionally reads during non-speculative execution. Nor does it repair DRAM disturbance. Its architectural concessions include dependency metadata, propagation and enforcement logic, verification effort, and stalls on restricted consumers~\cite{stt2019}.
+
+\subsection{InvisiSpec: Delaying Observable Cache Effects}
+InvisiSpec proposes a speculative buffer that allows unsafe speculative loads to obtain data without immediately making their accesses visible in the ordinary cache hierarchy. When the loads become safe, further actions make accesses visible and, where necessary, validate values to preserve the memory model. The design demonstrates that maintaining useful speculative work and controlling its observable effects are related but distinct goals~\cite{invisispec2018}.
+
+The corrected author-hosted evaluation reports that, relative to its conventional insecure baseline, the Spectre-focused fence configuration incurs 82\% execution-time slowdown while InvisiSpec incurs 5\%. For the paper's broader ``futuristic'' attack model, the corresponding slowdowns are 231\% and 17\%~\cite{invisispec2018}. These are results from that study's simulated configurations and evaluated workloads, not universal overhead estimates or measurements performed for this paper. They also supersede the earlier figures associated with the original version.
+
+The comparison supports a narrower conclusion than ``security is free'': a targeted design can preserve more performance than a coarse restriction under the evaluated conditions. It still requires additional storage, visibility rules, and validation mechanisms. A cache-hierarchy defense must also be distinguished from a complete defense against every timing or contention channel. Security claims must remain tied to the observations the mechanism actually controls~\cite{contracts2021,spectre2019,invisispec2018}.
+
+\subsection{Physical-Memory Protection}
+RowHammer requires defenses addressing disturbance rather than speculative cache effects. The original paper considers more frequent refresh, error correction, and its proposed PARA mechanism. PARA probabilistically refreshes physically adjacent rows; it is not simply an access-throttling policy. Additional refresh consumes memory-system resources, while tracking-based approaches require state. Error correction is useful but must be assessed against the error patterns and code capabilities rather than presumed to eliminate every disturbance error~\cite{kim2014}.
+
+\section{Discussion: Must Secure Computers Be Slower?}
+\subsection{Selective Constraints, Not Arbitrary Delay}
+The readings initially suggest a conflict: processors gain speed by doing work early, while security sometimes requires waiting. However, deliberately slowing an operating system does not necessarily prevent a processor from exposing the same unauthorized data. If useful observations remain available, an attacker may simply need more time. An unrelated delay is not equivalent to resolving a permission check before forwarding data or preventing a secret-dependent effect.
+
+Security mechanisms can impose costs, but they do not all reduce performance in the same way. KPTI removes mappings from a context; resource partitioning reduces sharing; barriers restrict execution overlap; STT controls dependent uses; and InvisiSpec changes when cache effects become visible. Spectector moves some assurance work into analysis rather than imposing an identical runtime restriction everywhere. These examples reject a binary choice between a small, slow computer and a large, fast, insecure one.
+
+My synthesis is that architects should evaluate performance within a stated security boundary, not optimize first and treat every resulting leak as an independent exception. A proposed optimization should identify what state it shares, who can influence that state, and which observations cross domains. Its performance benefit can then be judged against a specific protection obligation. Hardware--software contracts provide a principled direction for expressing those obligations~\cite{contracts2021}.
+
+\subsection{The Economics of Sharing and Complexity}
+The pressure to make systems ``bigger and faster'' is partly a pressure to reuse resources efficiently. Sharing caches, retaining translations, and overlapping execution can improve throughput and utilization. Security restrictions may reduce those benefits. Additional buffers or metadata can preserve performance but consume area and increase validation complexity. The cost is therefore multidimensional: execution time, capacity, energy, implementation effort, compatibility, and assurance effort all matter.
+
+There is also a distinction between a performance result and an economic conclusion. A reported slowdown does not by itself determine whether a defense is worthwhile. A workload handling valuable long-lived keys may justify restrictions that are inappropriate for a different threat model. Conversely, a fast defense with an unmet assumption does not deliver meaningful security merely because its benchmark overhead is low. The literature reviewed here supports comparison of mechanisms, but not a numerical estimate of total ownership cost or expected financial loss.
+
+\subsection{Future Predictors and Limits of This Review}
+The original Spectre discussion raises concerns about increasingly complex prediction, including references to machine-learning-related prediction techniques~\cite{spectre2019}. That motivates a research question, not a conclusion that AI features inherently create a particular new exploit. A neural-network accelerator and a learned branch predictor have different roles. The relevant security questions remain whether untrusted execution can influence prediction across domains and whether resulting transient behavior can disclose protected data.
+
+This paper is a focused review of foundational attacks and selected defenses, primarily from 2014--2021. It is not an exhaustive survey of all vulnerabilities or processor mitigations available in 2026. It does not reproduce the cited experiments, establish current susceptibility of a particular machine, or prove the completeness of a proposed defense. Power, electromagnetic leakage, fault injection, and other hardware-security topics remain outside its main scope. These limits favor a defensible architecture argument over an unsupported claim of comprehensive coverage.
+
+\section{Conclusion}
+Security has affected computer architecture by changing what isolation must encompass. Protecting architectural memory and privilege state remains necessary, but is insufficient when shared timing behavior, transient computation, or physical disturbance exposes another path across a trust boundary. FLUSH+RELOAD demonstrates access-pattern leakage through shared cache lines. Meltdown demonstrates a failure to contain information before a fault takes architectural effect. Spectre demonstrates that prediction can misuse a victim's legitimate authority even when ordinary architectural execution remains correct. RIDL and RowHammer show why the analysis must also consider internal data paths and physical memory behavior.
+
+The defenses address different causes and impose different concessions. Mapping isolation, execution barriers, partitioning, speculative buffering, taint tracking, and physical-memory protections cannot be treated as interchangeable fixes. Their guarantees depend on attacker capabilities, hardware behavior, software obligations, and the observations included in the threat model. Symbolic analysis can improve assurance, but its conclusions are only as broad as its model and coverage.
+
+The answer to the performance question is therefore not that secure computers must be uniformly slower. It is that performance must be pursued subject to explicit limits on unauthorized information flow and state modification. The most useful architectural comparison asks which boundary a defense protects, which risks remain, and what resources it consumes to achieve that protection. That is a more durable design principle than either disabling every optimization or assuming that correct committed execution is sufficient for security.
+
+\bibliography{References}
 \end{document} 
